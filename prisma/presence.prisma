@@ -1,0 +1,97 @@
+generator client {
+  provider      = "prisma-client-js"
+  output        = "../generated/presence"
+  binaryTargets = ["native", "linux-musl", "linux-musl-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource presenceDb {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+model Attendance {
+  employeeNumber  String             @presenceDb.VarChar(255)
+  date            DateTime           @presenceDb.Date
+  checkinTime     DateTime?
+  checkoutTime    DateTime?
+  sessionType     AttendanceSession?
+  attendanceType  AttendanceType?
+  locationType    LocationType       @default(CAMPUS)
+  takenLocation   String?            @presenceDb.VarChar(255)
+  photoUrl        String?            @presenceDb.VarChar(500)
+  audioUrl        String?            @presenceDb.VarChar(500)
+  audioDuration   Int?
+  latitude        Float?             @presenceDb.Float
+  longitude       Float?             @presenceDb.Float
+  locationAddress String?            @presenceDb.VarChar(500)
+  county          String?            @presenceDb.VarChar(255)
+  state           String?            @presenceDb.VarChar(255)
+  postcode        String?            @presenceDb.VarChar(20)
+
+  @@id([employeeNumber, date])
+  @@index([date])
+  @@index([employeeNumber])
+  @@index([employeeNumber, date])
+  @@map("attendances")
+}
+
+model Calendar {
+  date        DateTime @id @presenceDb.Date
+  isHoliday   Boolean  @default(false)
+  isWeekend   Boolean  @default(false)
+  description String?  @presenceDb.VarChar(255)
+
+  @@index([date])
+  @@index([isHoliday])
+  @@map("calendar")
+}
+
+model FieldTrip {
+  fieldTripKey   String   @id @default(cuid())
+  employeeNumber String   @presenceDb.VarChar(255)
+  startDate      DateTime @presenceDb.Date
+  endDate        DateTime @presenceDb.Date
+  description    String?  @presenceDb.Text
+  isActive       Boolean  @default(true)
+  createdBy      String   @presenceDb.VarChar(255)
+
+  @@index([employeeNumber])
+  @@index([startDate, endDate])
+  @@index([employeeNumber, startDate, endDate])
+  @@map("field_trips")
+}
+
+enum LocationType {
+  CAMPUS
+  FIELDTRIP
+}
+
+enum AttendanceSession {
+  FN
+  AF
+}
+
+enum AttendanceType {
+  FULL_DAY
+  HALF_DAY
+}
+
+model ModifiedAttendance {
+  id              Int                    @id @default(autoincrement())
+  employeeNumber  String                 @presenceDb.VarChar(255)
+  date            DateTime               @presenceDb.Date
+  status          ModifiedAttendanceStatus
+  comment         String                 @presenceDb.Text
+  piEmployeeNumber String                @presenceDb.VarChar(255)
+  createdAt       DateTime               @default(now())
+
+  @@index([employeeNumber])
+  @@index([date])
+  @@index([employeeNumber, date])
+  @@map("modified_attendances")
+}
+
+enum ModifiedAttendanceStatus {
+  ADDED
+  REMOVED
+}

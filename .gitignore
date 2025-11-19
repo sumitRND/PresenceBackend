@@ -1,0 +1,8 @@
+/certs
+/generated
+/uploads
+.env
+package-lock.json
+/prisma/migrations
+/.vscode
+/node_modules

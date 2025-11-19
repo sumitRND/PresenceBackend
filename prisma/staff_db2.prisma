@@ -1,0 +1,26 @@
+generator staff_db2_client {
+  provider = "prisma-client-js"
+  output   = "../generated/staff_db2"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("STAFF_DATABASE_URL_2")
+}
+
+model StaffWithPi {
+  staffEmpId         String  @db.VarChar(20)
+  staffUsername      String? @db.VarChar(150)
+  staffFullName      String? @db.VarChar(242)
+  projectId          String  @db.VarChar(50)
+  deptName           String? @db.VarChar(100)
+  empClass           String  @db.VarChar(2)
+  joiningDate        String? @db.VarChar(500)
+  termCompletionDate String? @db.VarChar(500)
+  piEmpId            String? @db.VarChar(20)
+  piUsername         String? @db.VarChar(150)
+  piFullName         String? @db.VarChar(242)
+
+  @@id([staffEmpId, projectId])
+  @@map("staff_with_pi")
+}
