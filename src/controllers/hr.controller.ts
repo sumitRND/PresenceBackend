@@ -1,51 +1,102 @@
 import type { Request, Response } from "express";
 import { createObjectCsvStringifier } from "csv-writer";
-import { localPrisma } from "../config/db.js";
-import { hrRequests, submittedData } from "../shared/state.js";
+import { localPrisma, staffDb1Prisma, staffDb2Prisma } from "../config/db.js";
 import { generateToken } from "../utils/jwt.js";
-import mysql from "mysql2/promise";
 
 const HR_USER = { username: "HRUser", password: "password" };
 
-const createStaffDbConnection = async () => {
-  const connection = await mysql.createConnection({
-    host: "172.16.134.51",
-    user: "sumit31",
-    password: "sumit123",
-    database: "rndautomation",
-  });
-  return connection;
-};
+// Helper function to get staff info from both databases
+async function getStaffInfo(employeeIds: string[]) {
+  const [staffDb1Results, staffDb2Results] = await Promise.all([
+    staffDb1Prisma.staffWithPi.findMany({
+      where: {
+        staffEmpId: { in: employeeIds },
+      },
+      select: {
+        staffEmpId: true,
+        staffFullName: true,
+        staffUsername: true,
+      },
+    }),
+    staffDb2Prisma.staffWithPi.findMany({
+      where: {
+        staffEmpId: { in: employeeIds },
+      },
+      select: {
+        staffEmpId: true,
+        staffFullName: true,
+        staffUsername: true,
+      },
+    }),
+  ]);
 
-async function calculateWorkingDays(
-  startDate: Date,
-  endDate: Date,
-): Promise<number> {
-  const totalDays = endDate.getDate();
-  const holidaysAndWeekends = await localPrisma.calendar.count({
-    where: {
-      date: { gte: startDate, lte: endDate },
-      OR: [{ isHoliday: true }, { isWeekend: true }],
-    },
+  // Combine results and remove duplicates
+  const staffMap = new Map<string, { fullName: string; username: string }>();
+  
+  [...staffDb1Results, ...staffDb2Results].forEach((staff) => {
+    if (!staffMap.has(staff.staffEmpId)) {
+      staffMap.set(staff.staffEmpId, {
+        fullName: staff.staffFullName || staff.staffEmpId,
+        username: staff.staffUsername || staff.staffEmpId,
+      });
+    }
   });
-  return totalDays - holidaysAndWeekends;
+
+  return staffMap;
 }
 
-// Add this helper function to your hr.controller.ts
+// Helper function to get all PIs from both databases
+async function getAllPIsFromBothDatabases() {
+  const [piListDb1, piListDb2] = await Promise.all([
+    staffDb1Prisma.staffWithPi.findMany({
+      where: {
+        piUsername: { not: null },
+      },
+      distinct: ['piUsername'],
+      select: {
+        piUsername: true,
+        piFullName: true,
+      },
+      orderBy: {
+        piUsername: 'asc',
+      },
+    }),
+    staffDb2Prisma.staffWithPi.findMany({
+      where: {
+        piUsername: { not: null },
+      },
+      distinct: ['piUsername'],
+      select: {
+        piUsername: true,
+        piFullName: true,
+      },
+      orderBy: {
+        piUsername: 'asc',
+      },
+    }),
+  ]);
+
+  // Combine and deduplicate PIs
+  const piMap = new Map<string, string>();
+  [...piListDb1, ...piListDb2].forEach((pi) => {
+    if (pi.piUsername && !piMap.has(pi.piUsername)) {
+      piMap.set(pi.piUsername, pi.piFullName || pi.piUsername);
+    }
+  });
+
+  return Array.from(piMap.entries())
+    .map(([username, fullName]) => ({ username, fullName }))
+    .sort((a, b) => a.username.localeCompare(b.username));
+}
+
 async function calculateWorkingDaysUpToToday(
   startDate: Date,
   endDate: Date,
 ): Promise<number> {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-
-  // Use the earlier of endDate or today
   const effectiveEndDate = endDate > today ? today : endDate;
-
-  // If we haven't reached the start of the month yet, return 0
-  if (today < startDate) {
-    return 0;
-  }
+  if (today < startDate) return 0;
 
   const totalDays = effectiveEndDate.getDate();
   const holidaysAndWeekends = await localPrisma.calendar.count({
@@ -71,32 +122,20 @@ export const hrLogin = async (req: Request, res: Response) => {
 };
 
 export const getAllPIs = async (req: Request, res: Response) => {
-  let connection;
   try {
-    connection = await createStaffDbConnection();
-    const [rows] = await connection.execute(
-      "SELECT DISTINCT piUsername, piFullName FROM staff_with_pi ORDER BY piUsername ASC",
-    );
-
-    const piList = (rows as any[]).map((row) => ({
-      username: row.piUsername,
-      fullName: row.piFullName,
-    }));
-
+    const piList = await getAllPIsFromBothDatabases();
     return res.json({ success: true, data: piList });
   } catch (error) {
     console.error("Error fetching PIs:", error);
     return res
       .status(500)
       .json({ success: false, error: "Could not retrieve PI list." });
-  } finally {
-    if (connection) await connection.end();
   }
 };
 
-// Update the requestDataFromPIs function in src/controllers/hr.controller.ts
 export const requestDataFromPIs = async (req: Request, res: Response) => {
   const { piUsernames, month, year, message } = req.body;
+
   if (!piUsernames || !Array.isArray(piUsernames) || !month || !year) {
     return res.status(400).json({
       success: false,
@@ -104,25 +143,49 @@ export const requestDataFromPIs = async (req: Request, res: Response) => {
     });
   }
 
-  const requestKey = `${month}-${year}`;
-  const requestMessage = message || "Request for attendance data for";
+  try {
+    const requestMessage = message || "Request for attendance data for";
 
-  piUsernames.forEach((pi: string) => {
-    if (!hrRequests[pi]) hrRequests[pi] = {};
-    hrRequests[pi][requestKey] = {
-      requestedAt: Date.now(),
-      message: requestMessage,
-    };
-  });
+    const createPromises = piUsernames.map((piUsername: string) =>
+      localPrisma.hRPIDataRequest.upsert({
+        where: {
+          piUsername_month_year: {
+            piUsername,
+            month,
+            year,
+          },
+        },
+        update: {
+          requestedAt: new Date(),
+          requestMessage,
+          status: "PENDING",
+        },
+        create: {
+          piUsername,
+          month,
+          year,
+          requestMessage,
+          status: "PENDING",
+        },
+      }),
+    );
 
-  return res.json({
-    success: true,
-    message: `Request sent to ${piUsernames.length} PIs for ${requestKey}`,
-  });
+    await Promise.all(createPromises);
+
+    return res.json({
+      success: true,
+      message: `Request sent to ${piUsernames.length} PIs for ${month}/${year}`,
+    });
+  } catch (error) {
+    console.error("Error creating requests:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to send requests",
+    });
+  }
 };
 
 export const getSubmissionStatus = async (req: Request, res: Response) => {
-  let connection;
   try {
     const { month, year } = req.query;
     if (!month || !year) {
@@ -130,51 +193,47 @@ export const getSubmissionStatus = async (req: Request, res: Response) => {
         .status(400)
         .json({ success: false, error: "Month and year are required." });
     }
-    const requestKey = `${month}-${year}`;
-    const statuses: Record<
-      string,
-      {
-        status: string;
-        fullName: string;
-        isPartial?: boolean;
-        submittedCount?: number;
-        totalCount?: number;
-      }
-    > = {};
 
-    connection = await createStaffDbConnection();
-    const [rows] = await connection.execute(
-      "SELECT DISTINCT piUsername, piFullName FROM staff_with_pi ORDER BY piUsername ASC",
-    );
+    const queryMonth = parseInt(month as string);
+    const queryYear = parseInt(year as string);
 
-    const piList = rows as any[];
+    const piList = await getAllPIsFromBothDatabases();
+
+    const requests = await localPrisma.hRPIDataRequest.findMany({
+      where: {
+        month: queryMonth,
+        year: queryYear,
+      },
+    });
+
+    const requestMap = new Map(requests.map((req) => [req.piUsername, req]));
+
+    const statuses: Record<string, any> = {};
 
     piList.forEach((pi) => {
-      const submission = submittedData[pi.piUsername]?.[requestKey];
-      const hasRequest = hrRequests[pi.piUsername]?.[requestKey];
+      const request = requestMap.get(pi.username);
 
       let status: string;
       let statusInfo: any = {
-        fullName: pi.piFullName,
+        fullName: pi.fullName,
       };
 
-      if (submission) {
-        const isComplete = submission.users && submission.users.length > 0;
-        status = isComplete ? "complete" : "pending";
-
-        // Add partial submission info
-        if (submission.isPartial) {
-          statusInfo.isPartial = true;
-          statusInfo.submittedCount = submission.submittedEmployeeIds.length; // Use .length to get the count
-          statusInfo.totalCount = submission.totalEmployeeCount;
+      if (request) {
+        if (request.status === "SUBMITTED" || request.status === "DOWNLOADED") {
+          status = "complete";
+          if (request.isPartial) {
+            statusInfo.isPartial = true;
+            statusInfo.submittedCount = request.submittedCount;
+            statusInfo.totalCount = request.totalCount;
+          }
+        } else {
+          status = "requested";
         }
-      } else if (hasRequest) {
-        status = "requested";
       } else {
         status = "none";
       }
 
-      statuses[pi.piUsername] = {
+      statuses[pi.username] = {
         status,
         ...statusInfo,
       };
@@ -187,105 +246,202 @@ export const getSubmissionStatus = async (req: Request, res: Response) => {
       success: false,
       error: "Could not retrieve submission statuses.",
     });
-  } finally {
-    if (connection) await connection.end();
   }
 };
 
-// Update the downloadReport function:
 export const downloadReport = async (req: Request, res: Response) => {
   const { piUsernames, month, year } = req.query;
+
   if (!piUsernames || !month || !year) {
     return res
       .status(400)
       .json({ success: false, error: "Missing required parameters." });
   }
-  const piList = (piUsernames as string).split(",");
-  const requestKey = `${month}-${year}`;
 
+  const piList = (piUsernames as string).split(",");
   const queryYear = parseInt(year as string);
   const queryMonth = parseInt(month as string);
 
-  const startDate = new Date(queryYear, queryMonth - 1, 1);
-  const endDate = new Date(queryYear, queryMonth, 0);
+  try {
+    const startDate = new Date(queryYear, queryMonth - 1, 1);
+    const endDate = new Date(queryYear, queryMonth, 0);
+    const totalWorkingDays = await calculateWorkingDaysUpToToday(
+      startDate,
+      endDate,
+    );
 
-  // Calculate working days only up to today
-  const totalWorkingDays = await calculateWorkingDaysUpToToday(
-    startDate,
-    endDate,
-  );
+    const submissions = await localPrisma.hRPIDataRequest.findMany({
+      where: {
+        piUsername: { in: piList },
+        month: queryMonth,
+        year: queryYear,
+        status: { in: ["SUBMITTED", "DOWNLOADED"] },
+      },
+    });
 
-  let allUsersData: any[] = [];
-  let partialSubmissions: string[] = [];
+    if (submissions.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No data has been submitted for the selected criteria.",
+      });
+    }
 
-  piList.forEach((pi) => {
-    const submission = submittedData[pi]?.[requestKey];
-    if (submission && submission.users) {
-      allUsersData = [...allUsersData, ...submission.users];
+    let allUsersData: any[] = [];
+    let partialSubmissions: string[] = [];
+    const allEmployeeIds: string[] = [];
 
-      // Track if this PI submitted partial data
+    submissions.forEach((s) => {
+      if (s.submittedEmployeeIds) {
+        allEmployeeIds.push(...JSON.parse(s.submittedEmployeeIds));
+      }
+    });
+
+    // Use the new helper function
+    const staffInfoMap = await getStaffInfo(allEmployeeIds);
+
+    for (const submission of submissions) {
+      if (!submission.submittedEmployeeIds) continue;
+
+      const employeeIds = JSON.parse(submission.submittedEmployeeIds);
+
+      const attendances = await localPrisma.attendance.findMany({
+        where: {
+          employeeNumber: { in: employeeIds },
+          date: { gte: startDate, lte: endDate },
+        },
+      });
+
+      const modifiedAttendances = await localPrisma.modifiedAttendance.findMany(
+        {
+          where: {
+            employeeNumber: { in: employeeIds },
+            date: { gte: startDate, lte: endDate },
+          },
+        },
+      );
+
+      const employeeAttendanceMap = new Map<string, any[]>();
+      attendances.forEach((att) => {
+        if (!employeeAttendanceMap.has(att.employeeNumber)) {
+          employeeAttendanceMap.set(att.employeeNumber, []);
+        }
+        employeeAttendanceMap.get(att.employeeNumber)!.push(att);
+      });
+
+      const employeeModifiedMap = new Map<string, any[]>();
+      modifiedAttendances.forEach((mod) => {
+        if (!employeeModifiedMap.has(mod.employeeNumber)) {
+          employeeModifiedMap.set(mod.employeeNumber, []);
+        }
+        employeeModifiedMap.get(mod.employeeNumber)!.push(mod);
+      });
+
+      employeeIds.forEach((empId: string) => {
+        const empAttendances = employeeAttendanceMap.get(empId) || [];
+        const empModified = employeeModifiedMap.get(empId) || [];
+
+        const fullDays = empAttendances.filter(
+          (a: any) => a.attendanceType === "FULL_DAY",
+        ).length;
+        const halfDays =
+          empAttendances.filter((a: any) => a.attendanceType === "HALF_DAY")
+            .length * 0.5;
+        const addedDays = empModified.filter(
+          (m: any) => m.status === "ADDED",
+        ).length;
+        const removedDays = empModified.filter(
+          (m: any) => m.status === "REMOVED",
+        ).length;
+
+        const totalDays = fullDays + halfDays + addedDays - removedDays;
+
+        const staffInfo = staffInfoMap.get(empId);
+
+        allUsersData.push({
+          username: staffInfo?.fullName || empId,
+          monthlyStatistics: {
+            totalDays,
+            addedDays,
+            removedDays,
+          },
+        });
+      });
+
       if (submission.isPartial) {
         partialSubmissions.push(
-          `${pi} (${submission.submittedEmployeeIds}/${submission.totalEmployeeCount} employees)`,
+          `${submission.piUsername} (${submission.submittedCount}/${submission.totalCount} employees)`,
         );
       }
     }
-  });
 
-  if (allUsersData.length === 0) {
-    return res.status(404).json({
+    const records = allUsersData.map((user) => {
+      const presentDays = user.monthlyStatistics.totalDays;
+      const absentDays = Math.max(0, totalWorkingDays - presentDays);
+
+      return {
+        Project_Staff_Name: user.username,
+        "Total Working Days": totalWorkingDays,
+        "Present Days": presentDays.toFixed(1),
+        "Absent Days": absentDays.toFixed(1),
+        "Added Days": user.monthlyStatistics.addedDays || 0,
+        "Removed Days": user.monthlyStatistics.removedDays || 0,
+        "Final Total": presentDays.toFixed(1),
+      };
+    });
+
+    let csvData = "";
+    if (partialSubmissions.length > 0) {
+      csvData = `# Note: The following PIs submitted partial data:\n`;
+      partialSubmissions.forEach((ps) => {
+        csvData += `# ${ps}\n`;
+      });
+      csvData += "\n";
+    }
+
+    const csvStringifier = createObjectCsvStringifier({
+      header: [
+        { id: "Project_Staff_Name", title: "Project_Staff_Name" },
+        { id: "Total Working Days", title: "Total Working Days" },
+        { id: "Present Days", title: "Present Days" },
+        { id: "Absent Days", title: "Absent Days" },
+        { id: "Added Days", title: "Added Days" },
+        { id: "Removed Days", title: "Removed Days" },
+        { id: "Final Total", title: "Final Total" },
+      ],
+    });
+
+    csvData +=
+      csvStringifier.getHeaderString() +
+      csvStringifier.stringifyRecords(records);
+
+    await localPrisma.hRPIDataRequest.updateMany({
+      where: {
+        piUsername: { in: piList },
+        month: queryMonth,
+        year: queryYear,
+      },
+      data: {
+        status: "DOWNLOADED",
+        downloadedAt: new Date(),
+        downloadedBy: (req as any).user?.username || "HR",
+      },
+    });
+
+    const fileName =
+      piList.length > 1
+        ? `Combined_Report_${queryMonth}_${queryYear}.csv`
+        : `${piList[0]}_Report_${queryMonth}_${queryYear}.csv`;
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename=${fileName}`);
+    res.send(csvData);
+  } catch (error) {
+    console.error("Download error:", error);
+    return res.status(500).json({
       success: false,
-      error: "No data has been submitted for the selected criteria.",
+      error: "Failed to generate report",
     });
   }
-
-  const records = allUsersData.map((user) => {
-    const presentDays = user.monthlyStatistics.totalDays;
-    const absentDays = Math.max(0, totalWorkingDays - presentDays);
-
-    return {
-      Project_Staff_Name: user.username,
-      "Total Working Days": totalWorkingDays,
-      "Present Days": presentDays.toFixed(1),
-      "Absent Days": absentDays.toFixed(1),
-      "Added Days": user.monthlyStatistics.addedDays || 0,
-      "Removed Days": user.monthlyStatistics.removedDays || 0,
-      "Final Total": presentDays.toFixed(1),
-    };
-  });
-
-  // Add a header row if there are partial submissions
-  let csvData = "";
-  if (partialSubmissions.length > 0) {
-    csvData = `# Note: The following PIs submitted partial data:\n`;
-    partialSubmissions.forEach((ps) => {
-      csvData += `# ${ps}\n`;
-    });
-    csvData += "\n";
-  }
-
-  const csvStringifier = createObjectCsvStringifier({
-    header: [
-      { id: "Project_Staff_Name", title: "Project_Staff_Name" },
-      { id: "Total Working Days", title: "Total Working Days" },
-      { id: "Present Days", title: "Present Days" },
-      { id: "Absent Days", title: "Absent Days" },
-      { id: "Added Days", title: "Added Days" },
-      { id: "Removed Days", title: "Removed Days" },
-      { id: "Final Total", title: "Final Total" },
-    ],
-  });
-
-  csvData +=
-    csvStringifier.getHeaderString() + csvStringifier.stringifyRecords(records);
-
-  const fileName =
-    piList.length > 1
-      ? `Combined_Report_${month}_${year}.csv`
-      : `${piList[0]}_Report_${month}_${year}.csv`;
-  res.setHeader("Content-Type", "text/csv");
-  res.setHeader("Content-Disposition", `attachment; filename=${fileName}`);
-  res.send(csvData);
 };
 
 export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
@@ -306,11 +462,21 @@ export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
       ? parseInt(year as string)
       : new Date().getFullYear();
 
-    const requestKey = `${queryMonth}-${queryYear}`;
+    const submission = await localPrisma.hRPIDataRequest.findUnique({
+      where: {
+        piUsername_month_year: {
+          piUsername,
+          month: queryMonth,
+          year: queryYear,
+        },
+      },
+    });
 
-    // Check for the submitted data first
-    const submission = submittedData[piUsername]?.[requestKey];
-    if (!submission || !submission.submittedEmployeeIds) {
+    if (
+      !submission ||
+      !submission.submittedEmployeeIds ||
+      submission.status === "PENDING"
+    ) {
       return res.status(404).json({
         success: false,
         error: "No data has been submitted by this PI for the selected period.",
@@ -320,8 +486,7 @@ export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
     const startDate = new Date(queryYear, queryMonth - 1, 1);
     const endDate = new Date(queryYear, queryMonth, 0);
 
-    // Use the list of employee IDs from the submission
-    const staffIds = submission.submittedEmployeeIds;
+    const staffIds = JSON.parse(submission.submittedEmployeeIds);
 
     if (staffIds.length === 0) {
       return res.json({
@@ -330,16 +495,25 @@ export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
       });
     }
 
-    const [attendances, totalWorkingDays] = await Promise.all([
-      localPrisma.attendance.findMany({
-        where: {
-          employeeNumber: { in: staffIds }, // Query is now correctly filtered
-          date: { gte: startDate, lte: endDate },
-        },
-        orderBy: { date: "asc" },
-      }),
-      calculateWorkingDaysUpToToday(startDate, endDate),
-    ]);
+    const [attendances, modifiedAttendances, totalWorkingDays, staffInfoMap] =
+      await Promise.all([
+        localPrisma.attendance.findMany({
+          where: {
+            employeeNumber: { in: staffIds },
+            date: { gte: startDate, lte: endDate },
+          },
+          orderBy: { date: "asc" },
+        }),
+        localPrisma.modifiedAttendance.findMany({
+          where: {
+            employeeNumber: { in: staffIds },
+            date: { gte: startDate, lte: endDate },
+          },
+          orderBy: { date: "asc" },
+        }),
+        calculateWorkingDaysUpToToday(startDate, endDate),
+        getStaffInfo(staffIds),
+      ]);
 
     const attendancesMap = new Map<string, any[]>();
     attendances.forEach((att) => {
@@ -348,33 +522,49 @@ export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
       attendancesMap.get(att.employeeNumber)!.push(att);
     });
 
-    const formattedUsers = submission.users
-      .filter((submittedUser) => submittedUser.username)
-      .map((submittedUser) => {
-        const userAttendances =
-          attendancesMap.get(submittedUser.employeeId) || [];
-        const presentDays = new Set(
-          userAttendances.map((a) => a.date.toISOString().split("T")[0]),
-        ).size;
+    const modifiedAttendancesMap = new Map<string, any[]>();
+    modifiedAttendances.forEach((mod) => {
+      if (!modifiedAttendancesMap.has(mod.employeeNumber))
+        modifiedAttendancesMap.set(mod.employeeNumber, []);
+      modifiedAttendancesMap.get(mod.employeeNumber)!.push(mod);
+    });
+
+    const formattedUsers = staffIds
+      .map((empId: string) => {
+        const userAttendances = attendancesMap.get(empId) || [];
+        const userModifiedAttendances = modifiedAttendancesMap.get(empId) || [];
+
+        const fullDays = userAttendances.filter(
+          (a) => a.attendanceType === "FULL_DAY",
+        ).length;
+        const halfDays =
+          userAttendances.filter((a) => a.attendanceType === "HALF_DAY").length *
+          0.5;
+        const addedDays = userModifiedAttendances.filter(
+          (m) => m.status === "ADDED",
+        ).length;
+        const removedDays = userModifiedAttendances.filter(
+          (m) => m.status === "REMOVED",
+        ).length;
+
+        const presentDays = fullDays + halfDays + addedDays - removedDays;
         const absentDays = Math.max(0, totalWorkingDays - presentDays);
 
-        // NEW: Extract adjustment data from the submission
-        const adjustmentDelta = ((submittedUser.monthlyStatistics as any)?.addedDays || 0) - ((submittedUser.monthlyStatistics as any)?.removedDays || 0);
-        const adjustmentComment = (submittedUser as any).adjustmentComment || '';
-
+        const staffInfo = staffInfoMap.get(empId);
 
         return {
-          username: submittedUser.username!,
-          employeeId: submittedUser.employeeId,
+          username: staffInfo?.fullName || empId,
+          employeeId: empId,
           workingDays: totalWorkingDays,
-          presentDays,
-          absentDays,
+          presentDays: parseFloat(presentDays.toFixed(1)),
+          absentDays: parseFloat(absentDays.toFixed(1)),
           attendances: userAttendances,
-          adjustmentDelta,
-          adjustmentComment,
+          modifiedAttendances: userModifiedAttendances,
         };
       })
-      .sort((a, b) => a.username.localeCompare(b.username!));
+      .sort((a: { username: string }, b: { username: string }) =>
+        a.username.localeCompare(b.username)
+      );
 
     res.json({
       success: true,
@@ -392,9 +582,7 @@ export const getPIUsersWithAttendance = async (req: Request, res: Response) => {
   }
 };
 
-// Also update downloadPIReport function similarly:
 export const downloadPIReport = async (req: Request, res: Response) => {
-  let connection;
   try {
     const { username: piUsername } = req.params;
     const { month, year } = req.query;
@@ -408,40 +596,88 @@ export const downloadPIReport = async (req: Request, res: Response) => {
 
     const queryMonth = parseInt(month as string);
     const queryYear = parseInt(year as string);
-    const requestKey = `${queryMonth}-${queryYear}`;
 
-    const startDate = new Date(queryYear, queryMonth - 1, 1);
-    const endDate = new Date(queryYear, queryMonth, 0);
+    const submission = await localPrisma.hRPIDataRequest.findUnique({
+      where: {
+        piUsername_month_year: {
+          piUsername,
+          month: queryMonth,
+          year: queryYear,
+        },
+      },
+    });
 
-    // Check for submitted data for this PI
-    const submission = submittedData[piUsername]?.[requestKey];
-    if (!submission || !submission.users) {
+    if (
+      !submission ||
+      !submission.submittedEmployeeIds ||
+      submission.status === "PENDING"
+    ) {
       return res.status(404).json({
         success: false,
         error: "No data has been submitted by this PI for the selected period.",
       });
     }
 
+    const startDate = new Date(queryYear, queryMonth - 1, 1);
+    const endDate = new Date(queryYear, queryMonth, 0);
     const totalWorkingDays = await calculateWorkingDaysUpToToday(
       startDate,
       endDate,
     );
 
-    const records = submission.users.map((user: any) => {
-      const presentDays = user.monthlyStatistics.totalDays;
+    const employeeIds = JSON.parse(submission.submittedEmployeeIds);
+    if (employeeIds.length === 0) {
+      return res.status(404).send("No employees submitted for this PI.");
+    }
+
+    const [attendances, modifiedAttendances, staffInfoMap] = await Promise.all([
+      localPrisma.attendance.findMany({
+        where: {
+          employeeNumber: { in: employeeIds },
+          date: { gte: startDate, lte: endDate },
+        },
+      }),
+      localPrisma.modifiedAttendance.findMany({
+        where: {
+          employeeNumber: { in: employeeIds },
+          date: { gte: startDate, lte: endDate },
+        },
+      }),
+      getStaffInfo(employeeIds),
+    ]);
+
+    const records = employeeIds.map((empId: string) => {
+      const empAttendances = attendances.filter(
+        (a) => a.employeeNumber === empId,
+      );
+      const empModified = modifiedAttendances.filter(
+        (m) => m.employeeNumber === empId,
+      );
+
+      const fullDays = empAttendances.filter(
+        (a) => a.attendanceType === "FULL_DAY",
+      ).length;
+      const halfDays =
+        empAttendances.filter((a) => a.attendanceType === "HALF_DAY").length *
+        0.5;
+      const addedDays = empModified.filter((m) => m.status === "ADDED").length;
+      const removedDays = empModified.filter(
+        (m) => m.status === "REMOVED",
+      ).length;
+
+      const presentDays = fullDays + halfDays + addedDays - removedDays;
       const absentDays = Math.max(0, totalWorkingDays - presentDays);
-      const addedDays = user.monthlyStatistics.addedDays || 0;
-      const removedDays = user.monthlyStatistics.removedDays || 0;
-      const finalTotal = presentDays;
+
+      const staffInfo = staffInfoMap.get(empId);
 
       return {
-        Username: user.username,
+        Username: staffInfo?.fullName || empId,
         "Working Days": totalWorkingDays,
         "Present Days": presentDays.toFixed(1),
         "Absent Days": absentDays.toFixed(1),
         "Added Days": addedDays,
         "Removed Days": removedDays,
-        "Final Total": finalTotal.toFixed(1),
+        "Final Total": presentDays.toFixed(1),
       };
     });
 
@@ -467,7 +703,5 @@ export const downloadPIReport = async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error("Download PI report error:", error);
     res.status(500).send("Failed to generate report");
-  } finally {
-    if (connection) (connection as any).end();
   }
 };

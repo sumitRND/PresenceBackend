@@ -95,3 +95,31 @@ enum ModifiedAttendanceStatus {
   ADDED
   REMOVED
 }
+
+model HRPIDataRequest {
+  piUsername          String   @presenceDb.VarChar(255)
+  month               Int      
+  year                Int      
+  requestedAt         DateTime @default(now())
+  requestMessage      String?  @presenceDb.Text
+  status              DataRequestStatus @default(PENDING)
+  submittedAt         DateTime?
+  isPartial           Boolean  @default(false)
+  submittedCount      Int?
+  totalCount          Int?
+  submittedEmployeeIds String? @presenceDb.Text
+
+  downloadedAt        DateTime?
+  downloadedBy        String?  @presenceDb.VarChar(255)
+  @@id([piUsername, month, year])
+  @@index([status])
+  @@index([piUsername])
+  @@index([requestedAt])
+  @@map("hr_pi_data_requests")
+}
+
+enum DataRequestStatus {
+  PENDING
+  SUBMITTED
+  DOWNLOADED
+}

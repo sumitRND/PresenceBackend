@@ -2,7 +2,6 @@ import type { Request, Response } from "express";
 import mysql from "mysql2/promise";
 import { AttendanceType } from "../../generated/presence/index.js";
 import { localPrisma } from "../config/db.js";
-import { hrRequests, submittedData } from "../shared/state.js";
 
 const createStaffDbConnection = async () => {
   const connection = await mysql.createConnection({
@@ -104,98 +103,94 @@ export const getPIUsersAttendance = async (req: Request, res: Response) => {
     const fieldTripsMap = new Map<string, any[]>();
     fieldTrips.forEach((ft) => {
       if (!fieldTripsMap.has(ft.employeeNumber))
-      fieldTripsMap.set(ft.employeeNumber, []);
-    fieldTripsMap.get(ft.employeeNumber)!.push(ft);
-  });
+        fieldTripsMap.set(ft.employeeNumber, []);
+      fieldTripsMap.get(ft.employeeNumber)!.push(ft);
+    });
 
-  const modifiedAttendancesMap = new Map<string, any[]>();
-  modifiedAttendances.forEach((modAtt) => {
-    if (!modifiedAttendancesMap.has(modAtt.employeeNumber))
-      modifiedAttendancesMap.set(modAtt.employeeNumber, []);
-    modifiedAttendancesMap.get(modAtt.employeeNumber)!.push(modAtt);
-  });
+    const modifiedAttendancesMap = new Map<string, any[]>();
+    modifiedAttendances.forEach((modAtt) => {
+      if (!modifiedAttendancesMap.has(modAtt.employeeNumber))
+        modifiedAttendancesMap.set(modAtt.employeeNumber, []);
+      modifiedAttendancesMap.get(modAtt.employeeNumber)!.push(modAtt);
+    });
 
-  const groupedStaff = groupStaffDataFromView(staffEntriesForPI);
+    const groupedStaff = groupStaffDataFromView(staffEntriesForPI);
 
-  const formattedUsers = groupedStaff.map((user) => {
-    const userAttendances = attendancesMap.get(user.employeeNumber) || [];
-    const userFieldTrips = fieldTripsMap.get(user.employeeNumber) || [];
-    const userModifiedAttendances =
-      modifiedAttendancesMap.get(user.employeeNumber) || [];
+    const formattedUsers = groupedStaff.map((user) => {
+      const userAttendances = attendancesMap.get(user.employeeNumber) || [];
+      const userFieldTrips = fieldTripsMap.get(user.employeeNumber) || [];
+      const userModifiedAttendances =
+        modifiedAttendancesMap.get(user.employeeNumber) || [];
 
-    const fullDays = userAttendances.filter(
-      (a) => a.attendanceType === AttendanceType.FULL_DAY,
-    ).length;
-    const halfDays = userAttendances.filter(
-      (a) => a.attendanceType === AttendanceType.HALF_DAY,
-    ).length;
-    const notCheckedOut = userAttendances.filter(
-      (a) => !a.checkoutTime,
-    ).length;
+      const fullDays = userAttendances.filter(
+        (a) => a.attendanceType === AttendanceType.FULL_DAY,
+      ).length;
+      const halfDays =
+        userAttendances.filter(
+          (a) => a.attendanceType === AttendanceType.HALF_DAY,
+        ).length * 0.5;
+      const notCheckedOut = userAttendances.filter(
+        (a) => !a.checkoutTime,
+      ).length;
 
-    const addedDays = userModifiedAttendances.filter(
-      (a: any) => a.status === "ADDED",
-    ).length;
-    const removedDays = userModifiedAttendances.filter(
-      (a: any) => a.status === "REMOVED",
-    ).length;
+      const addedDays = userModifiedAttendances.filter(
+        (a: any) => a.status === "ADDED",
+      ).length;
+      const removedDays = userModifiedAttendances.filter(
+        (a: any) => a.status === "REMOVED",
+      ).length;
 
-    const totalDays =
-      fullDays +
-      halfDays * 1 +
-      notCheckedOut * 1 +
-      addedDays -
-      removedDays;
+      const totalDays = fullDays + halfDays + addedDays - removedDays;
 
-    return {
-      employeeNumber: user.employeeNumber,
-      username: user.username,
-      empClass: user.empClass,
-      projects: user.projects,
-      hasActiveFieldTrip: userFieldTrips.length > 0,
-      monthlyStatistics: {
-        totalDays,
-        fullDays,
-        halfDays,
-        notCheckedOut,
-        addedDays,
-        removedDays,
-      },
-      attendances: userAttendances.map((att) => ({
-        date: att.date,
-        checkinTime: att.checkinTime,
-        checkoutTime: att.checkoutTime,
-        sessionType: att.sessionType,
-        attendanceType: att.attendanceType,
-        isFullDay: att.attendanceType === AttendanceType.FULL_DAY,
-        isHalfDay: att.attendanceType === AttendanceType.HALF_DAY,
-        isCheckedOut: !!att.checkoutTime,
-        takenLocation: att.takenLocation,
-        location: {
-          takenLocation: att.takenLocation,
-          latitude: att.latitude,
-          longitude: att.longitude,
-          county: att.county,
-          state: att.state,
-          postcode: att.postcode,
-          address:
-            att.locationAddress ||
-            (att.county || att.state || att.postcode
-              ? `${att.county || ""}, ${att.state || ""}, ${
-                  att.postcode || ""
-                }`
-                  .replace(/^, |, , |, $/g, "")
-                  .trim()
-              : null),
+      return {
+        employeeNumber: user.employeeNumber,
+        username: user.username,
+        empClass: user.empClass,
+        projects: user.projects,
+        hasActiveFieldTrip: userFieldTrips.length > 0,
+        monthlyStatistics: {
+          totalDays,
+          fullDays,
+          halfDays,
+          notCheckedOut,
+          addedDays,
+          removedDays,
         },
-        photo: att.photoUrl ? { url: att.photoUrl } : null,
-        audio: att.audioUrl
-          ? { url: att.audioUrl, duration: att.audioDuration }
-          : null,
-      })),
-      modifiedAttendances: userModifiedAttendances,
-    };
-  });
+        attendances: userAttendances.map((att) => ({
+          date: att.date,
+          checkinTime: att.checkinTime,
+          checkoutTime: att.checkoutTime,
+          sessionType: att.sessionType,
+          attendanceType: att.attendanceType,
+          isFullDay: att.attendanceType === AttendanceType.FULL_DAY,
+          isHalfDay: att.attendanceType === AttendanceType.HALF_DAY,
+          isCheckedOut: !!att.checkoutTime,
+          takenLocation: att.takenLocation,
+          location: {
+            takenLocation: att.takenLocation,
+            latitude: att.latitude,
+            longitude: att.longitude,
+            county: att.county,
+            state: att.state,
+            postcode: att.postcode,
+            address:
+              att.locationAddress ||
+              (att.county || att.state || att.postcode
+                ? `${att.county || ""}, ${att.state || ""}, ${
+                    att.postcode || ""
+                  }`
+                    .replace(/^, |, , |, $/g, "")
+                    .trim()
+                : null),
+          },
+          photo: att.photoUrl ? { url: att.photoUrl } : null,
+          audio: att.audioUrl
+            ? { url: att.audioUrl, duration: att.audioDuration }
+            : null,
+        })),
+        modifiedAttendances: userModifiedAttendances,
+      };
+    });
 
     res.status(200).json({
       success: true,
@@ -236,7 +231,7 @@ export const getModifiedAttendance = async (req: Request, res: Response) => {
     console.error("Get modified attendance error:", error);
     res.status(500).json({ success: false, error: error.message });
   }
-}
+};
 
 export const deleteModifiedAttendance = async (req: Request, res: Response) => {
   try {
@@ -254,27 +249,59 @@ export const deleteModifiedAttendance = async (req: Request, res: Response) => {
       },
     });
 
-    res.status(200).json({ success: true, message: "Modified attendance deleted successfully" });
+    res
+      .status(200)
+      .json({ success: true, message: "Modified attendance deleted successfully" });
   } catch (error: any) {
     console.error("Delete modified attendance error:", error);
     res.status(500).json({ success: false, error: error.message });
   }
-}
+};
 
+// ============= DATABASE APPROACH =============
+
+/**
+ * Get PI notifications from database
+ * This REPLACES checking the in-memory hrRequests object
+ */
 export const getPiNotifications = async (req: Request, res: Response) => {
   const piUsername = req.user?.username;
   if (!piUsername) {
     return res.status(401).json({ success: false, error: "Unauthorized PI" });
   }
-  const notifications = hrRequests[piUsername]
-    ? Object.keys(hrRequests[piUsername]).map((key) => {
-        const [month, year] = key.split("-");
-        return { month, year };
-      })
-    : [];
-  return res.json({ success: true, data: notifications });
+
+  try {
+    // Query database for pending requests for this PI
+    const pendingRequests = await localPrisma.hRPIDataRequest.findMany({
+      where: {
+        piUsername,
+        status: "PENDING",
+      },
+      orderBy: {
+        requestedAt: "desc",
+      },
+    });
+
+    const notifications = pendingRequests.map((req) => ({
+      month: req.month,
+      year: req.year,
+      message: req.requestMessage,
+    }));
+
+    return res.json({ success: true, data: notifications });
+  } catch (error) {
+    console.error("Error fetching PI notifications:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch notifications",
+    });
+  }
 };
 
+/**
+ * Submit attendance data to HR (database approach)
+ * This REPLACES storing in the in-memory submittedData object
+ */
 export const submitDataToHR = async (req: Request, res: Response) => {
   let connection;
   try {
@@ -285,17 +312,24 @@ export const submitDataToHR = async (req: Request, res: Response) => {
     }
 
     const { month, year, selectedEmployees, sendAll } = req.body;
-    const requestKey = `${month}-${year}`;
 
-    if (!hrRequests[piUsername]?.[requestKey]) {
+    // Check if request exists in database
+    const existingRequest = await localPrisma.hRPIDataRequest.findUnique({
+      where: {
+        piUsername_month_year: {
+          piUsername,
+          month,
+          year,
+        },
+      },
+    });
+
+    if (!existingRequest || existingRequest.status !== "PENDING") {
       return res.status(404).json({
         success: false,
         error: "No active data request found from HR for this period.",
       });
     }
-
-    const startDate = new Date(year, month - 1, 1);
-    const endDate = new Date(year, month, 0);
 
     connection = await createStaffDbConnection();
     const [rows] = await connection.execute(
@@ -303,16 +337,29 @@ export const submitDataToHR = async (req: Request, res: Response) => {
       [piUsername],
     );
     const staffEntriesForPI = rows as any[];
+    const totalEmployeeCount = new Set(staffEntriesForPI.map(s => s.staffEmpId)).size;
+
 
     if (staffEntriesForPI.length === 0) {
-      if (!submittedData[piUsername]) submittedData[piUsername] = {};
-      submittedData[piUsername][requestKey] = {
-        users: [],
-        submittedEmployeeIds: [],
-        totalEmployeeCount: 0,
-        isPartial: !sendAll,
-      };
-      delete hrRequests[piUsername][requestKey];
+      // Update request as submitted with 0 employees
+      await localPrisma.hRPIDataRequest.update({
+        where: {
+          piUsername_month_year: {
+            piUsername,
+            month,
+            year,
+          },
+        },
+        data: {
+          status: "SUBMITTED",
+          submittedAt: new Date(),
+          isPartial: !sendAll,
+          submittedCount: 0,
+          totalCount: 0,
+          submittedEmployeeIds: JSON.stringify([]),
+        },
+      });
+
       return res.json({
         success: true,
         message: `Attendance data for ${month}/${year} submitted to HR successfully.`,
@@ -334,101 +381,40 @@ export const submitDataToHR = async (req: Request, res: Response) => {
       staffIdsToProcess = selectedEmployees;
     }
 
-    const [attendances, modifiedAttendances] = await Promise.all([
-      localPrisma.attendance.findMany({
-        where: {
-          employeeNumber: { in: staffIdsToProcess },
-          date: { gte: startDate, lte: endDate },
+    // Update request in database with submission details
+    await localPrisma.hRPIDataRequest.update({
+      where: {
+        piUsername_month_year: {
+          piUsername,
+          month,
+          year,
         },
-      }),
-      localPrisma.modifiedAttendance.findMany({
-        where: {
-          employeeNumber: { in: staffIdsToProcess },
-          date: { gte: startDate, lte: endDate },
-        },
-      }),
-    ]);
-
-    const attendancesMap = new Map<string, any[]>();
-    attendances.forEach((att) => {
-      if (!attendancesMap.has(att.employeeNumber))
-        attendancesMap.set(att.employeeNumber, []);
-      attendancesMap.get(att.employeeNumber)!.push(att);
+      },
+      data: {
+        status: "SUBMITTED",
+        submittedAt: new Date(),
+        isPartial: !sendAll,
+        submittedCount: staffIdsToProcess.length,
+        totalCount: totalEmployeeCount,
+        submittedEmployeeIds: JSON.stringify(staffIdsToProcess),
+      },
     });
-
-    const modifiedAttendancesMap = new Map<string, any[]>();
-    modifiedAttendances.forEach((modAtt) => {
-      if (!modifiedAttendancesMap.has(modAtt.employeeNumber))
-        modifiedAttendancesMap.set(modAtt.employeeNumber, []);
-      modifiedAttendancesMap.get(modAtt.employeeNumber)!.push(modAtt);
-    });
-
-    const formattedUsers = staffIdsToProcess.map((staffId) => {
-      const userAttendances = attendancesMap.get(staffId) || [];
-      const userModifiedAttendances = modifiedAttendancesMap.get(staffId) || [];
-      const userDetails = staffEntriesForPI.find(
-        (s) => s.staffEmpId === staffId,
-      );
-
-      const fullDays = userAttendances.filter(
-        (a) => a.attendanceType === AttendanceType.FULL_DAY,
-      ).length;
-      const halfDays = userAttendances.filter(
-        (a) => a.attendanceType === AttendanceType.HALF_DAY,
-      ).length;
-      const notCheckedOut = userAttendances.filter(
-        (a) => !a.checkoutTime,
-      ).length;
-      const addedDays = userModifiedAttendances.filter(
-        (a) => a.status === "ADDED",
-      ).length;
-      const removedDays = userModifiedAttendances.filter(
-        (a) => a.status === "REMOVED",
-      ).length;
-      const totalDays =
-        fullDays +
-        halfDays * 1 +
-        notCheckedOut * 1 +
-        addedDays -
-        removedDays;
-
-      return {
-        employeeId: userDetails?.staffEmpId || staffId,
-        username: userDetails?.staffUsername || "Unknown",
-        monthlyStatistics: {
-          totalDays,
-          addedDays,
-          removedDays,
-        },
-      };
-    });
-
-    if (!submittedData[piUsername]) submittedData[piUsername] = {};
-
-    submittedData[piUsername][requestKey] = {
-      users: formattedUsers,
-      submittedEmployeeIds: staffIdsToProcess,
-      totalEmployeeCount: staffEntriesForPI.length,
-      isPartial: !sendAll,
-    };
-
-    delete hrRequests[piUsername][requestKey];
 
     const message = sendAll
-      ? `All employee attendance data (${formattedUsers.length} employees) for ${month}/${year} submitted to HR successfully.`
-      : `${formattedUsers.length} selected employee(s) attendance data for ${month}/${year} submitted to HR successfully.`;
+      ? `All employee attendance data (${staffIdsToProcess.length} employees) for ${month}/${year} submitted to HR successfully.`
+      : `${staffIdsToProcess.length} selected employee(s) attendance data for ${month}/${year} submitted to HR successfully.`;
 
     console.log(
-      `Data submitted by PI: ${piUsername} for ${requestKey} - ${
+      `Data submitted by PI: ${piUsername} for ${month}/${year} - ${
         sendAll ? "All" : "Selected"
-      } (${formattedUsers.length} employees)`,
+      } (${staffIdsToProcess.length} employees)`,
     );
 
     return res.json({
       success: true,
       message,
-      submittedCount: formattedUsers.length,
-      totalCount: staffEntriesForPI.length,
+      submittedCount: staffIdsToProcess.length,
+      totalCount: totalEmployeeCount,
     });
   } catch (error: any) {
     console.error("Submit data to HR error:", error);
@@ -459,19 +445,17 @@ export const modifyPIUsersAttendance = async (req: Request, res: Response) => {
         .json({ success: false, error: "Missing required fields" });
     }
 
-    // Fetch the PI's employee number from the database
     connection = await createStaffDbConnection();
     const [piRows] = await connection.execute(
       "SELECT DISTINCT piEmpId FROM staff_with_pi WHERE piUsername = ? LIMIT 1",
-      [piUsername]
+      [piUsername],
     );
     const piData = piRows as any[];
-    
+
     if (piData.length === 0) {
-      return res.status(404).json({ 
-        success: false, 
-        error: "PI employee number not found" 
-      });
+      return res
+        .status(404)
+        .json({ success: false, error: "PI employee number not found" });
     }
 
     const piEmployeeNumber = piData[0].piEmpId;
@@ -482,7 +466,7 @@ export const modifyPIUsersAttendance = async (req: Request, res: Response) => {
         date: new Date(date),
         status,
         comment,
-        piEmployeeNumber, // Now we have the correct PI employee number
+        piEmployeeNumber,
       },
     });
 
