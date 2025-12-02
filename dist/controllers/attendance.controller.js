@@ -283,9 +283,9 @@ export const getTodayAttendance = async (req, res) => {
         const now = new Date();
         const currentHour = now.getHours();
         let processedAttendance = { ...attendance };
-        if (currentHour >= 23 &&
-            !attendance.checkoutTime &&
-            attendance.checkinTime) {
+        // Logic Fix: Apply similar logic for the single day fetch
+        if ((currentHour >= 23 && !attendance.checkoutTime && attendance.checkinTime) ||
+            (attendance.attendanceType === AttendanceType.FULL_DAY && !attendance.checkoutTime)) {
             processedAttendance = {
                 ...attendance,
                 attendanceType: AttendanceType.FULL_DAY,
@@ -343,14 +343,21 @@ export const getUserAttendanceCalendar = async (req, res) => {
         const today = now.toISOString().split("T")[0];
         const processedAttendances = attendances.map((attendance) => {
             const attendanceDate = attendance.date.toISOString().split("T")[0];
-            if (attendanceDate === today &&
+            // Logic Fix: Check if it is EITHER the active 11PM window OR if the DB already says FULL_DAY with no checkout
+            const isAutoCompletedLogic = 
+            // Case 1: Live logic for today after 11 PM
+            (attendanceDate === today &&
                 currentHour >= 23 &&
                 !attendance.checkoutTime &&
-                attendance.checkinTime) {
+                attendance.checkinTime) ||
+                // Case 2: Past records where cron job ran (Type is FULL_DAY but checkout is NULL)
+                (attendance.attendanceType === AttendanceType.FULL_DAY &&
+                    !attendance.checkoutTime);
+            if (isAutoCompletedLogic) {
                 return {
                     ...attendance,
-                    attendanceType: AttendanceType.FULL_DAY,
-                    autoCompleted: true,
+                    attendanceType: AttendanceType.FULL_DAY, // Ensure this is set
+                    autoCompleted: true, // Send this flag to UI
                 };
             }
             return attendance;

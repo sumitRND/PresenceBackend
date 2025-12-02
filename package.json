@@ -34,7 +34,8 @@
     "ldapts": "^8.0.9",
     "multer": "^2.0.2",
     "mysql2": "^3.15.1",
-    "node-cron": "^4.2.1"
+    "node-cron": "^4.2.1",
+    "pm2": "^6.0.14"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",
